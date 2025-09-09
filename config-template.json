@@ -1,0 +1,62 @@
+{
+  "api_keys": {
+    "eventbrite": "YOUR_EVENTBRITE_API_KEY",
+    "facebook": "YOUR_FACEBOOK_ACCESS_TOKEN", 
+    "meetup": "YOUR_MEETUP_API_KEY"
+  },
+  "target_cities": [
+    "London", "Paris", "Milan", "Monaco", "Zurich", "Geneva",
+    "Amsterdam", "Frankfurt", "Munich", "Vienna", "Barcelona",
+    "Rome", "Florence", "Copenhagen", "Stockholm", "Brussels"
+  ],
+  "categories": [
+    "fashion", "finance", "automotive", "food_wine", "real_estate"
+  ],
+  "collection_settings": {
+    "frequency_hours": 24,
+    "min_luxury_score": 6,
+    "max_events_per_city": 50,
+    "date_range_days": 365
+  },
+  "luxury_scoring": {
+    "price_thresholds": {
+      "tier_1": 100,
+      "tier_2": 200, 
+      "tier_3": 500
+    },
+    "keyword_weights": {
+      "luxury": 2,
+      "exclusive": 2,
+      "premium": 1,
+      "vip": 1,
+      "private": 1,
+      "haute": 2,
+      "gourmet": 1
+    },
+    "venue_multipliers": {
+      "ritz": 2,
+      "four seasons": 2,
+      "mandarin": 2,
+      "park hyatt": 2,
+      "shangri-la": 2
+    }
+  },
+  "geographic_constraints": {
+    "max_flight_hours": 3,
+    "min_airport_distance_km": 50,
+    "preferred_airports": {
+      "London": ["LHR", "LGW", "STN", "LTN"],
+      "Paris": ["CDG", "ORY", "BVA"],
+      "Milan": ["MXP", "LIN", "BGY"],
+      "Monaco": ["NCE"],
+      "Zurich": ["ZUR"],
+      "Geneva": ["GVA"]
+    }
+  },
+  "dashboard_settings": {
+    "auto_refresh_minutes": 5,
+    "max_recent_events": 20,
+    "charts_enabled": true,
+    "map_integration": false
+  }
+}
