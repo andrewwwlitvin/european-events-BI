@@ -1,0 +1,106 @@
+name: Luxury Events Data Collection
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  collect-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Create config file
+      env:
+        EVENTBRITE_API_KEY: ${{ secrets.EVENTBRITE_API_KEY }}
+        MEETUP_API_KEY: ${{ secrets.MEETUP_API_KEY }}
+        FACEBOOK_ACCESS_TOKEN: ${{ secrets.FACEBOOK_ACCESS_TOKEN }}
+      run: |
+        echo '{
+          "api_keys": {
+            "eventbrite": "'$EVENTBRITE_API_KEY'",
+            "meetup": "'$MEETUP_API_KEY'",
+            "facebook": "'$FACEBOOK_ACCESS_TOKEN'"
+          },
+          "target_cities": [
+            "London", "Paris", "Milan", "Monaco", "Zurich", "Geneva",
+            "Amsterdam", "Frankfurt", "Munich", "Vienna", "Barcelona",
+            "Rome", "Florence", "Copenhagen", "Stockholm", "Brussels"
+          ],
+          "categories": [
+            "fashion", "finance", "automotive", "food_wine", "real_estate"
+          ],
+          "collection_frequency": 24,
+          "min_luxury_score": 6
+        }' > config.json
+        
+    - name: Run data collection
+      run: |
+        python main.py
+        echo "Data collection completed"
+        
+    - name: Create stats file
+      run: |
+        mkdir -p api
+        echo '{
+          "total_events": 0,
+          "premium_events": 0,
+          "cities_covered": 16,
+          "last_updated": "'$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)'",
+          "status": "active"
+        }' > api/stats.json
+        
+    - name: List generated files
+      run: |
+        echo "Generated files:"
+        ls -la *.db *.html || echo "Database and dashboard files will appear after successful data collection"
+        ls -la api/ || echo "API directory created"
+        
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      if: success()
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: .
+        publish_branch: gh-pages
+        
+    - name: Commit database changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add api/stats.json
+        if [ -f "luxury_events.db" ]; then
+          git add luxury_events.db
+        fi
+        if [ -f "status_dashboard.html" ]; then
+          git add status_dashboard.html
+        fi
+        git diff --staged --quiet || (git commit -m "Update data - $(date -u)" && git push)
+
+  notify-status:
+    needs: collect-data
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify completion
+      run: |
+        if [ "${{ needs.collect-data.result }}" = "success" ]; then
+          echo "✅ Data collection completed successfully"
+          echo "Dashboard should be available at: https://${{ github.repository_owner }}.github.io/luxury-events-intelligence/"
+        else
+          echo "❌ Data collection failed - check logs above"
+        fi
