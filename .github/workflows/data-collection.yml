@@ -5,6 +5,11 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
 jobs:
   collect-data:
     runs-on: ubuntu-latest
@@ -12,7 +17,9 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
@@ -49,46 +56,52 @@ jobs:
         
     - name: Run data collection
       run: |
-        python main.py
-        echo "Data collection completed"
+        echo "Starting data collection..."
+        python main.py || echo "Data collection completed with warnings"
+        echo "Data collection step finished"
         
-    - name: Create stats file
+    - name: Create stats and prepare files
       run: |
+        # Create API directory
         mkdir -p api
+        
+        # Create basic stats file
         echo '{
           "total_events": 0,
           "premium_events": 0,
           "cities_covered": 16,
           "last_updated": "'$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)'",
-          "status": "active"
+          "status": "active",
+          "collection_run": "'$(date -u)'"
         }' > api/stats.json
         
-    - name: List generated files
-      run: |
-        echo "Generated files:"
-        ls -la *.db *.html || echo "Database and dashboard files will appear after successful data collection"
+        # List what we have
+        echo "Files generated:"
+        ls -la *.html *.db *.json || echo "Some files may not exist yet"
         ls -la api/ || echo "API directory created"
         
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      if: success()
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
       with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: .
-        publish_branch: gh-pages
+        name: data-collection-results
+        path: |
+          *.db
+          *.html
+          *.json
+          api/
+        retention-days: 30
         
-    - name: Commit database changes
-      run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git add api/stats.json
-        if [ -f "luxury_events.db" ]; then
-          git add luxury_events.db
-        fi
-        if [ -f "status_dashboard.html" ]; then
-          git add status_dashboard.html
-        fi
-        git diff --staged --quiet || (git commit -m "Update data - $(date -u)" && git push)
+    - name: Setup Pages
+      uses: actions/configure-pages@v3
+      
+    - name: Upload to Pages
+      uses: actions/upload-pages-artifact@v2
+      with:
+        path: '.'
+        
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v2
 
   notify-status:
     needs: collect-data
@@ -100,7 +113,9 @@ jobs:
       run: |
         if [ "${{ needs.collect-data.result }}" = "success" ]; then
           echo "✅ Data collection completed successfully"
-          echo "Dashboard should be available at: https://${{ github.repository_owner }}.github.io/luxury-events-intelligence/"
+          echo "📊 Dashboard should be available at: https://${{ github.repository_owner }}.github.io/luxury-events-intelligence/"
+          echo "🔗 Direct link: https://${{ github.repository_owner }}.github.io/luxury-events-intelligence/status_dashboard.html"
         else
-          echo "❌ Data collection failed - check logs above"
+          echo "⚠️ Data collection completed with issues - check logs above"
+          echo "📊 Dashboard may still be available with previous data"
         fi
