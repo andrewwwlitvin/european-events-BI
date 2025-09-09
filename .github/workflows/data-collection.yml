@@ -17,8 +17,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
         
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -33,19 +31,15 @@ jobs:
     - name: Create config file
       env:
         EVENTBRITE_API_KEY: ${{ secrets.EVENTBRITE_API_KEY }}
-        MEETUP_API_KEY: ${{ secrets.MEETUP_API_KEY }}
-        FACEBOOK_ACCESS_TOKEN: ${{ secrets.FACEBOOK_ACCESS_TOKEN }}
       run: |
         echo '{
           "api_keys": {
             "eventbrite": "'$EVENTBRITE_API_KEY'",
-            "meetup": "'$MEETUP_API_KEY'",
-            "facebook": "'$FACEBOOK_ACCESS_TOKEN'"
+            "meetup": "",
+            "facebook": ""
           },
           "target_cities": [
-            "London", "Paris", "Milan", "Monaco", "Zurich", "Geneva",
-            "Amsterdam", "Frankfurt", "Munich", "Vienna", "Barcelona",
-            "Rome", "Florence", "Copenhagen", "Stockholm", "Brussels"
+            "London", "Paris", "Milan", "Monaco", "Zurich"
           ],
           "categories": [
             "fashion", "finance", "automotive", "food_wine", "real_estate"
@@ -56,66 +50,21 @@ jobs:
         
     - name: Run data collection
       run: |
-        echo "Starting data collection..."
-        python main.py || echo "Data collection completed with warnings"
-        echo "Data collection step finished"
+        echo "🔄 Starting luxury events data collection..."
+        python main.py
+        echo "✅ Data collection completed"
         
-    - name: Create stats and prepare files
+    - name: List results
       run: |
-        # Create API directory
-        mkdir -p api
+        echo "📁 Generated files:"
+        ls -la *.html *.db *.json || echo "Some files may be generated"
+        echo "📊 Data collection process finished"
         
-        # Create basic stats file
-        echo '{
-          "total_events": 0,
-          "premium_events": 0,
-          "cities_covered": 16,
-          "last_updated": "'$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)'",
-          "status": "active",
-          "collection_run": "'$(date -u)'"
-        }' > api/stats.json
-        
-        # List what we have
-        echo "Files generated:"
-        ls -la *.html *.db *.json || echo "Some files may not exist yet"
-        ls -la api/ || echo "API directory created"
-        
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+    - name: Deploy to GitHub Pages (Simple)
+      uses: peaceiris/actions-gh-pages@v3
       with:
-        name: data-collection-results
-        path: |
-          *.db
-          *.html
-          *.json
-          api/
-        retention-days: 30
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: .
         
-    - name: Setup Pages
-      uses: actions/configure-pages@v3
-      
-    - name: Upload to Pages
-      uses: actions/upload-pages-artifact@v2
-      with:
-        path: '.'
-        
-    - name: Deploy to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v2
-
-  notify-status:
-    needs: collect-data
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-    - name: Notify completion
+    - name: Success notification
       run: |
-        if [ "${{ needs.collect-data.result }}" = "success" ]; then
-          echo "✅ Data collection completed successfully"
-          echo "📊 Dashboard should be available at: https://${{ github.repository_owner }}.github.io/luxury-events-intelligence/"
-          echo "🔗 Direct link: https://${{ github.repository_owner }}.github.io/luxury-events-intelligence/status_dashboard.html"
-        else
-          echo "⚠️ Data collection completed with issues - check logs above"
-          echo "📊 Dashboard may still be available with previous data"
-        fi
