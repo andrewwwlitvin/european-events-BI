@@ -1,13 +1,11 @@
 {
   "api_keys": {
     "eventbrite": "Name: EVENTBRITE_API_KEY Value: FYPEHQ5BTSYFPNKBOC6T",
-    "meetup": "Your Meetup API ke",
-    "facebook": "Your Facebook API token (optional)"
+    "meetup": "",
+    "facebook": ""
   },
   "target_cities": [
-    "London", "Paris", "Milan", "Monaco", "Zurich", "Geneva",
-    "Amsterdam", "Frankfurt", "Munich", "Vienna", "Barcelona",
-    "Rome", "Florence", "Copenhagen", "Stockholm", "Brussels"
+    "London", "Paris", "Milan", "Monaco", "Zurich"
   ],
   "categories": [
     "fashion", "finance", "automotive", "food_wine", "real_estate"
