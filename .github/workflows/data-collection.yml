@@ -1,71 +1,1094 @@
-name: Luxury Events Data Collection
+"""
+Luxury Events Data Collection Infrastructure
+Main application for collecting European luxury event data and visitor analytics
+"""
 
-on:
-  schedule:
-    - cron: '0 6 * * *'
-  workflow_dispatch:
+import asyncio
+import aiohttp
+import sqlite3
+import json
+import logging
+import os
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass, asdict
+from pathlib import Path
+import requests
+from urllib.parse import urlencode
 
-permissions:
-  contents: write
-  pages: write
-  id-token: write
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-jobs:
-  collect-data:
-    runs-on: ubuntu-latest
+@dataclass
+class Event:
+    """Event data structure"""
+    event_id: str
+    name: str
+    description: str
+    start_date: datetime
+    end_date: datetime
+    venue_name: str
+    city: str
+    country: str
+    category: str
+    estimated_attendance: int
+    ticket_price_min: float
+    ticket_price_max: float
+    latitude: float
+    longitude: float
+    source: str
+    luxury_score: int  # 1-10 scale
+    attendee_demographics: Dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+@dataclass
+class VisitorData:
+    """Visitor demographics and origin data"""
+    event_id: str
+    origin_city: str
+    origin_country: str
+    visitor_count: int
+    age_group: str
+    income_bracket: str
+    travel_method: str
+    accommodation_type: str
+    source: str
+    confidence_score: float
+    created_at: datetime
+
+class DatabaseManager:
+    """Handle all database operations"""
     
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    def __init__(self, db_path: str = "luxury_events.db"):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Initialize database with required tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
+        # Events table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                venue_name TEXT,
+                city TEXT NOT NULL,
+                country TEXT NOT NULL,
+                category TEXT NOT NULL,
+                estimated_attendance INTEGER,
+                ticket_price_min REAL,
+                ticket_price_max REAL,
+                latitude REAL,
+                longitude REAL,
+                source TEXT,
+                luxury_score INTEGER,
+                attendee_demographics TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
         
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        # Visitor data table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS visitor_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT,
+                origin_city TEXT,
+                origin_country TEXT,
+                visitor_count INTEGER,
+                age_group TEXT,
+                income_bracket TEXT,
+                travel_method TEXT,
+                accommodation_type TEXT,
+                source TEXT,
+                confidence_score REAL,
+                created_at TEXT,
+                FOREIGN KEY (event_id) REFERENCES events (event_id)
+            )
+        ''')
         
-    - name: Create config file
-      env:
-        EVENTBRITE_API_KEY: ${{ secrets.EVENTBRITE_API_KEY }}
-      run: |
-        echo '{
-          "api_keys": {
-            "eventbrite": "'$EVENTBRITE_API_KEY'",
-            "meetup": "",
-            "facebook": ""
-          },
-          "target_cities": [
-            "London", "Paris", "Milan", "Monaco", "Zurich"
-          ],
-          "categories": [
-            "fashion", "finance", "automotive", "food_wine", "real_estate"
-          ],
-          "collection_frequency": 24,
-          "min_luxury_score": 6
-        }' > config.json
+        # Data collection status table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS collection_status (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                last_collection TEXT,
+                records_collected INTEGER,
+                status TEXT,
+                error_message TEXT
+            )
+        ''')
         
-    - name: Run data collection
-      run: |
-        echo "🔄 Starting luxury events data collection..."
-        python main.py
-        echo "✅ Data collection completed"
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
+    
+    def insert_event(self, event: Event) -> bool:
+        """Insert or update event in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                event.event_id, event.name, event.description,
+                event.start_date.isoformat(), event.end_date.isoformat(),
+                event.venue_name, event.city, event.country, event.category,
+                event.estimated_attendance, event.ticket_price_min, event.ticket_price_max,
+                event.latitude, event.longitude, event.source, event.luxury_score,
+                json.dumps(event.attendee_demographics),
+                event.created_at.isoformat(), event.updated_at.isoformat()
+            ))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Error inserting event: {e}")
+            return False
+    
+    def get_events_by_category(self, category: str) -> List[Dict]:
+        """Get events by category"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-    - name: List results
-      run: |
-        echo "📁 Generated files:"
-        ls -la *.html *.db *.json || echo "Some files may be generated"
+        cursor.execute('''
+            SELECT * FROM events WHERE category = ? ORDER BY start_date
+        ''', (category,))
         
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: .
+        events = cursor.fetchall()
+        conn.close()
+        return events
+    
+    def update_collection_status(self, source: str, records: int, status: str, error: str = None):
+        """Update data collection status"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-    - name: Success notification
-      run: |
-        echo "🎉 Workflow completed!"
-        echo "📊 Dashboard: https://${{ github.repository_owner }}.github.io/luxury-events-intelligence/"
+        cursor.execute('''
+            INSERT OR REPLACE INTO collection_status 
+            (source, last_collection, records_collected, status, error_message)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (source, datetime.now().isoformat(), records, status, error))
+        
+        conn.commit()
+        conn.close()
+
+class EventbriteCollector:
+    """Collect events from Eventbrite API"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = "https://www.eventbriteapi.com/v3"
+        # Remove headers - we'll use query parameter authentication instead
+    
+    async def search_luxury_events(self, city: str, categories: List[str]) -> List[Event]:
+        """Search for luxury events in specified city and categories"""
+        events = []
+        
+        for category in categories:
+            params = {
+                "location.address": city,
+                "categories": category,
+                "price": "paid",  # Focus on paid events
+                "start_date.range_start": datetime.now().isoformat(),
+                "start_date.range_end": (datetime.now() + timedelta(days=365)).isoformat(),
+                "expand": "venue,ticket_availability,organizer"
+            }
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f"{self.base_url}/events/search/"
+                    async with session.get(url, headers=self.headers, params=params) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            events.extend(self._parse_eventbrite_events(data.get('events', []), city))
+                        else:
+                            logger.error(f"Eventbrite API error: {response.status}")
+            
+            except Exception as e:
+                logger.error(f"Error collecting from Eventbrite: {e}")
+        
+        return events
+    
+    def _parse_eventbrite_events(self, events_data: List[Dict], city: str) -> List[Event]:
+        """Parse Eventbrite API response into Event objects"""
+        parsed_events = []
+        
+        for event_data in events_data:
+            try:
+                # Calculate luxury score based on ticket prices and description
+                luxury_score = self._calculate_luxury_score(event_data)
+                
+                # Skip events with low luxury scores
+                if luxury_score < 5:
+                    continue
+                
+                event = Event(
+                    event_id=f"eb_{event_data['id']}",
+                    name=event_data['name']['text'],
+                    description=event_data.get('description', {}).get('text', ''),
+                    start_date=datetime.fromisoformat(event_data['start']['utc'].replace('Z', '+00:00')),
+                    end_date=datetime.fromisoformat(event_data['end']['utc'].replace('Z', '+00:00')),
+                    venue_name=event_data.get('venue', {}).get('name', ''),
+                    city=city,
+                    country=self._extract_country(event_data),
+                    category=self._categorize_event(event_data),
+                    estimated_attendance=event_data.get('capacity', 0),
+                    ticket_price_min=self._extract_min_price(event_data),
+                    ticket_price_max=self._extract_max_price(event_data),
+                    latitude=float(event_data.get('venue', {}).get('latitude', 0)),
+                    longitude=float(event_data.get('venue', {}).get('longitude', 0)),
+                    source="eventbrite",
+                    luxury_score=luxury_score,
+                    attendee_demographics={},
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+                
+                parsed_events.append(event)
+                
+            except Exception as e:
+                logger.error(f"Error parsing event: {e}")
+                continue
+        
+        return parsed_events
+    
+    def _calculate_luxury_score(self, event_data: Dict) -> int:
+        """Calculate luxury score based on various factors"""
+        score = 0
+        
+        # Check ticket prices
+        if 'ticket_classes' in event_data:
+            max_price = max([tc.get('cost', {}).get('major_value', 0) for tc in event_data['ticket_classes']])
+            if max_price > 500:
+                score += 3
+            elif max_price > 200:
+                score += 2
+            elif max_price > 100:
+                score += 1
+        
+        # Check description for luxury keywords
+        description = event_data.get('description', {}).get('text', '').lower()
+        luxury_keywords = ['luxury', 'exclusive', 'premium', 'vip', 'haute', 'gourmet', 'private', 'invitation']
+        score += sum(1 for keyword in luxury_keywords if keyword in description)
+        
+        # Check venue type
+        venue_name = event_data.get('venue', {}).get('name', '').lower()
+        luxury_venues = ['ritz', 'four seasons', 'mandarin', 'park hyatt', 'shangri-la']
+        if any(venue in venue_name for venue in luxury_venues):
+            score += 2
+        
+        return min(score, 10)  # Cap at 10
+    
+    def _extract_country(self, event_data: Dict) -> str:
+        """Extract country from event data"""
+        address = event_data.get('venue', {}).get('address', {})
+        return address.get('country', 'Unknown')
+    
+    def _categorize_event(self, event_data: Dict) -> str:
+        """Categorize event based on Eventbrite categories"""
+        category_mapping = {
+            '103': 'fashion',
+            '101': 'finance',
+            '118': 'automotive',
+            '110': 'food_wine',
+            '109': 'real_estate'
+        }
+        
+        category_id = event_data.get('category_id')
+        return category_mapping.get(category_id, 'other')
+    
+    def _extract_min_price(self, event_data: Dict) -> float:
+        """Extract minimum ticket price"""
+        if 'ticket_classes' in event_data:
+            prices = [tc.get('cost', {}).get('major_value', 0) for tc in event_data['ticket_classes']]
+            return float(min([p for p in prices if p > 0], default=0))
+        return 0.0
+    
+    def _extract_max_price(self, event_data: Dict) -> float:
+        """Extract maximum ticket price"""
+        if 'ticket_classes' in event_data:
+            prices = [tc.get('cost', {}).get('major_value', 0) for tc in event_data['ticket_classes']]
+            return float(max(prices, default=0))
+        return 0.0
+
+class FacebookEventsCollector:
+    """Collect events from Facebook Graph API"""
+    
+    def __init__(self, access_token: str):
+        self.access_token = access_token
+        self.base_url = "https://graph.facebook.com/v18.0"
+    
+    async def search_events_by_location(self, city: str, luxury_keywords: List[str]) -> List[Event]:
+        """Search for luxury events by location"""
+        # Note: Facebook deprecated public event search
+        # This would need to be adapted for available endpoints
+        events = []
+        logger.warning("Facebook Events API has limited public access")
+        return events
+
+class MeetupCollector:
+    """Collect events from Meetup GraphQL API"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.graphql_url = "https://api.meetup.com/gql"
+    
+    async def search_luxury_meetups(self, city: str) -> List[Event]:
+        """Search for luxury/professional meetups"""
+        query = """
+        query($city: String!, $topicCategoryId: Int) {
+          rankedEvents(
+            filter: {
+              city: $city
+              topicCategoryId: $topicCategoryId
+              eventType: PHYSICAL
+            }
+          ) {
+            edges {
+              node {
+                id
+                title
+                description
+                dateTime
+                endTime
+                venue {
+                  name
+                  city
+                  country
+                  lat
+                  lng
+                }
+                group {
+                  name
+                }
+                eventType
+                going
+              }
+            }
+          }
+        }
+        """
+        
+        variables = {
+            "city": city,
+            "topicCategoryId": 2  # Business category
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                payload = {"query": query, "variables": variables}
+                
+                async with session.post(self.graphql_url, json=payload, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return self._parse_meetup_events(data, city)
+        except Exception as e:
+            logger.error(f"Error collecting from Meetup: {e}")
+        
+        return []
+    
+    def _parse_meetup_events(self, data: Dict, city: str) -> List[Event]:
+        """Parse Meetup GraphQL response"""
+        events = []
+        
+        edges = data.get('data', {}).get('rankedEvents', {}).get('edges', [])
+        
+        for edge in edges:
+            node = edge['node']
+            
+            # Filter for luxury/professional events
+            if not self._is_luxury_meetup(node):
+                continue
+            
+            try:
+                event = Event(
+                    event_id=f"mu_{node['id']}",
+                    name=node['title'],
+                    description=node.get('description', ''),
+                    start_date=datetime.fromisoformat(node['dateTime']),
+                    end_date=datetime.fromisoformat(node.get('endTime', node['dateTime'])),
+                    venue_name=node.get('venue', {}).get('name', ''),
+                    city=city,
+                    country=node.get('venue', {}).get('country', ''),
+                    category='networking',
+                    estimated_attendance=node.get('going', 0),
+                    ticket_price_min=0.0,  # Meetup typically free
+                    ticket_price_max=0.0,
+                    latitude=float(node.get('venue', {}).get('lat', 0)),
+                    longitude=float(node.get('venue', {}).get('lng', 0)),
+                    source="meetup",
+                    luxury_score=self._calculate_meetup_luxury_score(node),
+                    attendee_demographics={},
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+                
+                events.append(event)
+                
+            except Exception as e:
+                logger.error(f"Error parsing Meetup event: {e}")
+                continue
+        
+        return events
+    
+    def _is_luxury_meetup(self, node: Dict) -> bool:
+        """Check if meetup qualifies as luxury/high-end"""
+        title = node.get('title', '').lower()
+        description = node.get('description', '').lower()
+        
+        luxury_keywords = [
+            'executive', 'luxury', 'premium', 'exclusive', 'high-net-worth',
+            'private', 'vip', 'elite', 'sophisticated', 'upscale'
+        ]
+        
+        return any(keyword in title or keyword in description for keyword in luxury_keywords)
+    
+    def _calculate_meetup_luxury_score(self, node: Dict) -> int:
+        """Calculate luxury score for meetup events"""
+        score = 5  # Base score for professional networking
+        
+        title = node.get('title', '').lower()
+        description = node.get('description', '').lower()
+        
+        # Boost score for luxury indicators
+        if 'executive' in title or 'executive' in description:
+            score += 2
+        if 'private' in title or 'exclusive' in description:
+            score += 1
+        
+        return min(score, 10)
+
+class DataCollectionOrchestrator:
+    """Orchestrate data collection from multiple sources"""
+    
+    def __init__(self, config_path: str = "config.json"):
+        self.config = self._load_config(config_path)
+        self.db_manager = DatabaseManager()
+        self.collectors = self._initialize_collectors()
+    
+    def _load_config(self, config_path: str) -> Dict:
+        """Load configuration from JSON file"""
+        try:
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.warning(f"Config file {config_path} not found. Using default config.")
+            return self._create_default_config(config_path)
+    
+    def _create_default_config(self, config_path: str) -> Dict:
+        """Create default configuration file"""
+        default_config = {
+            "api_keys": {
+                "eventbrite": "YOUR_EVENTBRITE_API_KEY",
+                "facebook": "YOUR_FACEBOOK_ACCESS_TOKEN",
+                "meetup": "YOUR_MEETUP_API_KEY"
+            },
+            "target_cities": [
+                "London", "Paris", "Milan", "Monaco", "Zurich", "Geneva",
+                "Amsterdam", "Frankfurt", "Munich", "Vienna", "Barcelona",
+                "Rome", "Florence", "Copenhagen", "Stockholm", "Brussels"
+            ],
+            "categories": [
+                "fashion", "finance", "automotive", "food_wine", "real_estate"
+            ],
+            "collection_frequency": 24,  # hours
+            "min_luxury_score": 6
+        }
+        
+        with open(config_path, 'w') as f:
+            json.dump(default_config, f, indent=2)
+        
+        return default_config
+    
+    def _initialize_collectors(self) -> Dict:
+        """Initialize all data collectors"""
+        collectors = {}
+        
+        api_keys = self.config.get("api_keys", {})
+        
+        if api_keys.get("eventbrite"):
+            collectors["eventbrite"] = EventbriteCollector(api_keys["eventbrite"])
+        
+        if api_keys.get("facebook"):
+            collectors["facebook"] = FacebookEventsCollector(api_keys["facebook"])
+        
+        if api_keys.get("meetup"):
+            collectors["meetup"] = MeetupCollector(api_keys["meetup"])
+        
+        return collectors
+    
+    async def collect_all_data(self):
+        """Collect data from all configured sources"""
+        logger.info("Starting data collection process")
+        
+        cities = self.config.get("target_cities", [])
+        categories = self.config.get("categories", [])
+        
+        total_events = 0
+        
+        for city in cities:
+            logger.info(f"Collecting events for {city}")
+            
+            # Eventbrite collection
+            if "eventbrite" in self.collectors:
+                try:
+                    events = await self.collectors["eventbrite"].search_luxury_events(city, categories)
+                    for event in events:
+                        if event.luxury_score >= self.config.get("min_luxury_score", 6):
+                            self.db_manager.insert_event(event)
+                            total_events += 1
+                    
+                    self.db_manager.update_collection_status("eventbrite", len(events), "success")
+                    
+                except Exception as e:
+                    logger.error(f"Eventbrite collection failed for {city}: {e}")
+                    self.db_manager.update_collection_status("eventbrite", 0, "error", str(e))
+            
+            # Meetup collection
+            if "meetup" in self.collectors:
+                try:
+                    events = await self.collectors["meetup"].search_luxury_meetups(city)
+                    for event in events:
+                        if event.luxury_score >= self.config.get("min_luxury_score", 6):
+                            self.db_manager.insert_event(event)
+                            total_events += 1
+                    
+                    self.db_manager.update_collection_status("meetup", len(events), "success")
+                    
+                except Exception as e:
+                    logger.error(f"Meetup collection failed for {city}: {e}")
+                    self.db_manager.update_collection_status("meetup", 0, "error", str(e))
+        
+        logger.info(f"Data collection completed. Total events collected: {total_events}")
+        return total_events
+
+class StatusDashboardGenerator:
+    """Generate HTML dashboard showing project status"""
+    
+    def __init__(self, db_manager: DatabaseManager):
+        self.db_manager = db_manager
+    
+    def generate_dashboard(self) -> str:
+        """Generate complete HTML dashboard"""
+        stats = self._get_statistics()
+        recent_events = self._get_recent_events()
+        collection_status = self._get_collection_status()
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Luxury Events Data Collection - Project Status</title>
+            <style>
+                {self._get_css_styles()}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <header>
+                    <h1>🛩️ European Luxury Events Intelligence</h1>
+                    <p class="subtitle">Premium Flight Service Market Research</p>
+                    <div class="last-updated">Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}</div>
+                </header>
+                
+                <div class="stats-grid">
+                    {self._generate_stats_cards(stats)}
+                </div>
+                
+                <div class="content-grid">
+                    <div class="card">
+                        <h2>📊 Collection Status</h2>
+                        {self._generate_collection_status_table(collection_status)}
+                    </div>
+                    
+                    <div class="card">
+                        <h2>📅 Recent High-Value Events</h2>
+                        {self._generate_events_table(recent_events)}
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h2>🗺️ Geographic Distribution</h2>
+                    <div id="map-placeholder" class="map-placeholder">
+                        Interactive map will be implemented here
+                    </div>
+                </div>
+                
+                <footer>
+                    <p>Data collection infrastructure for premium aviation services targeting European luxury events</p>
+                    <p>🔧 Built with Python, SQLite, and async data collection</p>
+                </footer>
+            </div>
+            
+            <script>
+                {self._get_javascript()}
+            </script>
+        </body>
+        </html>
+        """
+        
+        return html
+    
+    def _get_statistics(self) -> Dict:
+        """Get current statistics from database"""
+        conn = sqlite3.connect(self.db_manager.db_path)
+        cursor = conn.cursor()
+        
+        # Total events
+        cursor.execute("SELECT COUNT(*) FROM events")
+        total_events = cursor.fetchone()[0]
+        
+        # Events by category
+        cursor.execute("SELECT category, COUNT(*) FROM events GROUP BY category")
+        by_category = dict(cursor.fetchall())
+        
+        # High luxury score events
+        cursor.execute("SELECT COUNT(*) FROM events WHERE luxury_score >= 8")
+        high_luxury = cursor.fetchone()[0]
+        
+        # Events in next 30 days
+        future_date = (datetime.now() + timedelta(days=30)).isoformat()
+        cursor.execute("SELECT COUNT(*) FROM events WHERE start_date <= ?", (future_date,))
+        upcoming = cursor.fetchone()[0]
+        
+        # Average luxury score
+        cursor.execute("SELECT AVG(luxury_score) FROM events")
+        avg_luxury = cursor.fetchone()[0] or 0
+        
+        conn.close()
+        
+        return {
+            "total_events": total_events,
+            "by_category": by_category,
+            "high_luxury": high_luxury,
+            "upcoming": upcoming,
+            "avg_luxury_score": round(avg_luxury, 1)
+        }
+    
+    def _get_recent_events(self) -> List[Dict]:
+        """Get recent high-value events"""
+        conn = sqlite3.connect(self.db_manager.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT name, city, country, start_date, luxury_score, estimated_attendance, category
+            FROM events 
+            WHERE luxury_score >= 7
+            ORDER BY created_at DESC 
+            LIMIT 10
+        """)
+        
+        events = cursor.fetchall()
+        conn.close()
+        
+        return [
+            {
+                "name": event[0],
+                "city": event[1],
+                "country": event[2],
+                "start_date": event[3],
+                "luxury_score": event[4],
+                "attendance": event[5],
+                "category": event[6]
+            }
+            for event in events
+        ]
+    
+    def _get_collection_status(self) -> List[Dict]:
+        """Get data collection status"""
+        conn = sqlite3.connect(self.db_manager.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT source, last_collection, records_collected, status, error_message
+            FROM collection_status
+            ORDER BY last_collection DESC
+        """)
+        
+        status = cursor.fetchall()
+        conn.close()
+        
+        return [
+            {
+                "source": s[0],
+                "last_collection": s[1],
+                "records": s[2],
+                "status": s[3],
+                "error": s[4]
+            }
+            for s in status
+        ]
+    
+    def _generate_stats_cards(self, stats: Dict) -> str:
+        """Generate statistics cards HTML"""
+        return f"""
+            <div class="stat-card">
+                <div class="stat-number">{stats['total_events']}</div>
+                <div class="stat-label">Total Events</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{stats['high_luxury']}</div>
+                <div class="stat-label">Premium Events (8+ score)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{stats['upcoming']}</div>
+                <div class="stat-label">Upcoming (30 days)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{stats['avg_luxury_score']}</div>
+                <div class="stat-label">Avg Luxury Score</div>
+            </div>
+        """
+    
+    def _generate_collection_status_table(self, status: List[Dict]) -> str:
+        """Generate collection status table"""
+        if not status:
+            return "<p>No collection status data available</p>"
+        
+        rows = ""
+        for s in status:
+            status_class = "success" if s['status'] == 'success' else "error"
+            last_collection = datetime.fromisoformat(s['last_collection']).strftime('%Y-%m-%d %H:%M') if s['last_collection'] else 'Never'
+            
+            rows += f"""
+                <tr>
+                    <td>{s['source'].title()}</td>
+                    <td>{last_collection}</td>
+                    <td>{s['records']}</td>
+                    <td><span class="status {status_class}">{s['status'].title()}</span></td>
+                </tr>
+            """
+        
+        return f"""
+            <table class="status-table">
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th>Last Collection</th>
+                        <th>Records</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows}
+                </tbody>
+            </table>
+        """
+    
+    def _generate_events_table(self, events: List[Dict]) -> str:
+        """Generate recent events table"""
+        if not events:
+            return "<p>No events data available</p>"
+        
+        rows = ""
+        for event in events:
+            start_date = datetime.fromisoformat(event['start_date']).strftime('%Y-%m-%d') if event['start_date'] else 'TBD'
+            
+            rows += f"""
+                <tr>
+                    <td class="event-name">{event['name']}</td>
+                    <td>{event['city']}, {event['country']}</td>
+                    <td>{start_date}</td>
+                    <td><span class="luxury-score score-{event['luxury_score']}">{event['luxury_score']}/10</span></td>
+                    <td class="category">{event['category'].replace('_', ' ').title()}</td>
+                </tr>
+            """
+        
+        return f"""
+            <table class="events-table">
+                <thead>
+                    <tr>
+                        <th>Event</th>
+                        <th>Location</th>
+                        <th>Date</th>
+                        <th>Luxury Score</th>
+                        <th>Category</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows}
+                </tbody>
+            </table>
+        """
+    
+    def _get_css_styles(self) -> str:
+        """Get CSS styles for the dashboard"""
+        return """
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                color: #333;
+            }
+            
+            .container {
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 20px;
+            }
+            
+            header {
+                text-align: center;
+                margin-bottom: 40px;
+                color: white;
+            }
+            
+            header h1 {
+                font-size: 2.5rem;
+                margin-bottom: 10px;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            }
+            
+            .subtitle {
+                font-size: 1.2rem;
+                opacity: 0.9;
+                margin-bottom: 10px;
+            }
+            
+            .last-updated {
+                font-size: 0.9rem;
+                opacity: 0.8;
+                background: rgba(255,255,255,0.1);
+                padding: 5px 15px;
+                border-radius: 20px;
+                display: inline-block;
+            }
+            
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin-bottom: 40px;
+            }
+            
+            .stat-card {
+                background: white;
+                padding: 30px 20px;
+                border-radius: 15px;
+                text-align: center;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                transition: transform 0.3s ease;
+            }
+            
+            .stat-card:hover {
+                transform: translateY(-5px);
+            }
+            
+            .stat-number {
+                font-size: 2.5rem;
+                font-weight: bold;
+                color: #667eea;
+                margin-bottom: 10px;
+            }
+            
+            .stat-label {
+                font-size: 0.9rem;
+                color: #666;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }
+            
+            .content-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 30px;
+                margin-bottom: 40px;
+            }
+            
+            @media (max-width: 768px) {
+                .content-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+            
+            .card {
+                background: white;
+                padding: 30px;
+                border-radius: 15px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            }
+            
+            .card h2 {
+                margin-bottom: 20px;
+                color: #333;
+                border-bottom: 2px solid #667eea;
+                padding-bottom: 10px;
+            }
+            
+            .status-table, .events-table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 15px;
+            }
+            
+            .status-table th, .events-table th,
+            .status-table td, .events-table td {
+                padding: 12px;
+                text-align: left;
+                border-bottom: 1px solid #eee;
+            }
+            
+            .status-table th, .events-table th {
+                background: #f8f9fa;
+                font-weight: 600;
+                color: #333;
+            }
+            
+            .status.success {
+                background: #d4edda;
+                color: #155724;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 0.8rem;
+                text-transform: uppercase;
+            }
+            
+            .status.error {
+                background: #f8d7da;
+                color: #721c24;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 0.8rem;
+                text-transform: uppercase;
+            }
+            
+            .luxury-score {
+                padding: 4px 8px;
+                border-radius: 4px;
+                color: white;
+                font-weight: bold;
+                font-size: 0.8rem;
+            }
+            
+            .score-10, .score-9, .score-8 { background: #28a745; }
+            .score-7, .score-6 { background: #ffc107; color: #333; }
+            .score-5, .score-4 { background: #fd7e14; }
+            .score-3, .score-2, .score-1 { background: #dc3545; }
+            
+            .category {
+                background: #e9ecef;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 0.8rem;
+                text-transform: capitalize;
+            }
+            
+            .event-name {
+                font-weight: 500;
+                max-width: 200px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            
+            .map-placeholder {
+                height: 300px;
+                background: #f8f9fa;
+                border: 2px dashed #dee2e6;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                border-radius: 8px;
+                color: #6c757d;
+                font-style: italic;
+            }
+            
+            footer {
+                text-align: center;
+                margin-top: 40px;
+                padding: 20px;
+                background: rgba(255,255,255,0.1);
+                border-radius: 15px;
+                color: white;
+            }
+            
+            footer p {
+                margin-bottom: 5px;
+                opacity: 0.9;
+            }
+        """
+    
+    def _get_javascript(self) -> str:
+        """Get JavaScript for dashboard functionality"""
+        return """
+            // Auto-refresh dashboard every 5 minutes
+            setTimeout(() => {
+                location.reload();
+            }, 300000);
+            
+            // Add loading animation for future map integration
+            document.addEventListener('DOMContentLoaded', function() {
+                console.log('Luxury Events Dashboard loaded');
+                
+                // Future: Initialize interactive map
+                // initializeMap();
+            });
+        """
+
+async def main():
+    """Main application entry point"""
+    print("🛩️ Luxury Events Data Collection System")
+    print("=" * 50)
+    
+    # Initialize orchestrator
+    orchestrator = DataCollectionOrchestrator()
+    
+    # Check if config file exists and has valid API keys
+    if not orchestrator.config.get("api_keys", {}).get("eventbrite") or \
+       orchestrator.config["api_keys"]["eventbrite"] == "YOUR_EVENTBRITE_API_KEY":
+        print("⚠️  Please update config.json with your API keys before running data collection")
+        print("📝 A template config.json file has been created for you")
+        return
+    
+    # Run data collection
+    print("🔄 Starting data collection...")
+    total_events = await orchestrator.collect_all_data()
+    print(f"✅ Collection completed! {total_events} events processed")
+    
+    # Generate dashboard
+    print("📊 Generating status dashboard...")
+    dashboard_generator = StatusDashboardGenerator(orchestrator.db_manager)
+    html_content = dashboard_generator.generate_dashboard()
+    
+    # Save dashboard
+    dashboard_path = "status_dashboard.html"
+    with open(dashboard_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"🎯 Dashboard generated: {dashboard_path}")
+    print("🌐 Open this file in a browser to view the project status")
+    
+    # Print summary
+    conn = sqlite3.connect(orchestrator.db_manager.db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM events WHERE luxury_score >= 8")
+    premium_events = cursor.fetchone()[0]
+    conn.close()
+    
+    print(f"\n📈 Summary:")
+    print(f"   Total events: {total_events}")
+    print(f"   Premium events (8+ score): {premium_events}")
+    print(f"   Database: luxury_events.db")
+    print(f"   Dashboard: {dashboard_path}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
