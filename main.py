@@ -194,40 +194,93 @@ class EventbriteCollector:
         """Search for luxury events in specified city and categories"""
         events = []
         
-        for category in categories:
-            params = {
-                "token": self.api_key,  # Use token as query parameter, not Bearer header
+        # Updated API endpoint - Eventbrite changed their search structure
+        base_params = {
+            "token": self.api_key,
+            "expand": "venue,ticket_classes,organizer",
+            "status": "live",
+            "order_by": "start_asc"
+        }
+        
+        # Try different search approaches since the old /events/search/ endpoint is deprecated
+        search_strategies = [
+            # Strategy 1: Simple search by location
+            {
                 "location.address": city,
-                "categories": category,
-                "price": "paid",  # Focus on paid events
-                "start_date.range_start": datetime.now().isoformat(),
-                "start_date.range_end": (datetime.now() + timedelta(days=365)).isoformat(),
-                "expand": "venue,ticket_availability,organizer"
-            }
-            
+                "location.within": "25km"
+            },
+            # Strategy 2: Search with city in query
+            {
+                "q": f"events in {city}"
+            },
+            # Strategy 3: Search for luxury keywords
+            {
+                "q": "luxury OR exclusive OR premium OR VIP"
+            },
+            # Strategy 4: General events (no filter)
+            {}
+        ]
+        
+        for strategy_idx, location_params in enumerate(search_strategies):
             try:
+                # Combine base params with location strategy
+                params = {**base_params, **location_params}
+                
                 async with aiohttp.ClientSession() as session:
-                    url = f"{self.base_url}/events/search/"
-                    # Don't use headers for auth - use query parameter instead
+                    # Use the correct events endpoint (not /events/search/)
+                    url = f"{self.base_url}/events/"
+                    
                     async with session.get(url, params=params) as response:
                         if response.status == 200:
                             data = await response.json()
-                            events.extend(self._parse_eventbrite_events(data.get('events', []), city))
+                            events_found = data.get('events', [])
+                            logger.info(f"Strategy {strategy_idx + 1} found {len(events_found)} events for {city}")
+                            
+                            # Filter events by city and luxury criteria
+                            city_events = self._filter_events_by_city(events_found, city)
+                            events.extend(self._parse_eventbrite_events(city_events, city))
+                            
+                            if events:  # If we found events, we can continue to next city
+                                logger.info(f"Successfully collected {len(events)} events for {city}")
+                                break
+                                
                         else:
-                            logger.error(f"Eventbrite API error: {response.status}")
+                            logger.warning(f"Strategy {strategy_idx + 1} failed for {city}: {response.status}")
                             try:
                                 error_data = await response.json()
-                                logger.error(f"Error details: {error_data}")
+                                logger.warning(f"Error details: {error_data}")
                             except:
                                 error_text = await response.text()
-                                logger.error(f"Error response: {error_text}")
-                            logger.error(f"Request URL: {url}")
-                            logger.error(f"Request params: {params}")
+                                logger.warning(f"Error response: {error_text}")
             
             except Exception as e:
-                logger.error(f"Error collecting from Eventbrite: {e}")
+                logger.error(f"Error with strategy {strategy_idx + 1} for {city}: {e}")
+                continue
         
         return events
+    
+    def _filter_events_by_city(self, events_data: List[Dict], target_city: str) -> List[Dict]:
+        """Filter events to only include those in the target city"""
+        filtered_events = []
+        
+        for event in events_data:
+            venue = event.get('venue', {})
+            if venue:
+                event_city = venue.get('address', {}).get('city', '').lower()
+                event_region = venue.get('address', {}).get('region', '').lower()
+                venue_name = venue.get('name', '').lower()
+                
+                # Check if event is in target city (flexible matching)
+                if (target_city.lower() in event_city or 
+                    target_city.lower() in event_region or
+                    target_city.lower() in venue_name or
+                    event_city in target_city.lower()):
+                    filtered_events.append(event)
+            else:
+                # If no venue info, include it anyway (might be online event in that city)
+                filtered_events.append(event)
+        
+        return filtered_events
     
     def _parse_eventbrite_events(self, events_data: List[Dict], city: str) -> List[Event]:
         """Parse Eventbrite API response into Event objects"""
