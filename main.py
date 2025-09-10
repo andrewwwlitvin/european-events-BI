@@ -188,7 +188,7 @@ class EventbriteCollector:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://www.eventbriteapi.com/v3"
-        self.headers = {"Authorization": f"Bearer {api_key}"}
+        # Remove headers - we'll use query parameter authentication instead
     
     async def search_luxury_events(self, city: str, categories: List[str]) -> List[Event]:
         """Search for luxury events in specified city and categories"""
@@ -196,6 +196,7 @@ class EventbriteCollector:
         
         for category in categories:
             params = {
+                "token": self.api_key,  # Use token as query parameter, not Bearer header
                 "location.address": city,
                 "categories": category,
                 "price": "paid",  # Focus on paid events
@@ -207,12 +208,21 @@ class EventbriteCollector:
             try:
                 async with aiohttp.ClientSession() as session:
                     url = f"{self.base_url}/events/search/"
-                    async with session.get(url, headers=self.headers, params=params) as response:
+                    # Don't use headers for auth - use query parameter instead
+                    async with session.get(url, params=params) as response:
                         if response.status == 200:
                             data = await response.json()
                             events.extend(self._parse_eventbrite_events(data.get('events', []), city))
                         else:
                             logger.error(f"Eventbrite API error: {response.status}")
+                            try:
+                                error_data = await response.json()
+                                logger.error(f"Error details: {error_data}")
+                            except:
+                                error_text = await response.text()
+                                logger.error(f"Error response: {error_text}")
+                            logger.error(f"Request URL: {url}")
+                            logger.error(f"Request params: {params}")
             
             except Exception as e:
                 logger.error(f"Error collecting from Eventbrite: {e}")
@@ -517,13 +527,13 @@ class DataCollectionOrchestrator:
         
         api_keys = self.config.get("api_keys", {})
         
-        if api_keys.get("eventbrite"):
+        if api_keys.get("eventbrite") and api_keys["eventbrite"] != "YOUR_EVENTBRITE_API_KEY":
             collectors["eventbrite"] = EventbriteCollector(api_keys["eventbrite"])
         
-        if api_keys.get("facebook"):
+        if api_keys.get("facebook") and api_keys["facebook"] != "YOUR_FACEBOOK_ACCESS_TOKEN":
             collectors["facebook"] = FacebookEventsCollector(api_keys["facebook"])
         
-        if api_keys.get("meetup"):
+        if api_keys.get("meetup") and api_keys["meetup"] != "YOUR_MEETUP_API_KEY":
             collectors["meetup"] = MeetupCollector(api_keys["meetup"])
         
         return collectors
